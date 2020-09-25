@@ -17,7 +17,8 @@ np.random.seed(cfg.AGENT.TORCH_SEED)
 torch.manual_seed(cfg.AGENT.TORCH_SEED)
 
 Transition = namedtuple("Transition",
-                        ("state", "action", "state_dot", "reward"))
+                        ("state", "action", "state_dot", "reward",
+                         "next_state", "rintdiff"))
 
 
 class ReplayMemory():
@@ -48,6 +49,7 @@ class DQN(nn.Module):
             nn.BatchNorm1d(32),
             nn.Tanh(),
             nn.Linear(32, 1),
+            nn.Tanh()
         )
 
     def forward(self, x, u):
@@ -74,15 +76,14 @@ class Agent():
 
         self.M = cfg.AGENT.M
 
-        self.HJB_optimizer = optim.Adam(
+        self.Q_optimizer = optim.Adam(
             self.Q_function.parameters(), lr=cfg.AGENT.HJB_OPTIM_LR)
         self.actor_optimizer = optim.Adam(
             self.actor.parameters(), lr=cfg.AGENT.ACTOR_OPTIM_LR)
 
     def set_data(self, data):
-        x, u, xdot, r = [torch.tensor(d).float().flatten()[None, :]
-                         for d in data]
-        self.memory.push(x, u, xdot, r)
+        proc_data = [torch.tensor(d).float().flatten()[None, :] for d in data]
+        self.memory.push(*proc_data)
 
     def optimize_model(self):
         if len(self.memory) < cfg.AGENT.BATCH_SIZE:
@@ -95,6 +96,8 @@ class Agent():
         action_batch = torch.cat(batch.action)
         state_dot_batch = torch.cat(batch.state_dot)
         reward_batch = torch.cat(batch.reward)
+        next_state_batch = torch.cat(batch.next_state)
+        rintdiff_batch = torch.cat(batch.rintdiff)
 
         # Q-function update
         state_batch.requires_grad_(True)
@@ -111,6 +114,12 @@ class Agent():
             + reward_batch.flatten()
         ).square().mean()
 
+        with torch.no_grad():
+            next_action_batch = self.actor(next_state_batch)
+            next_Q = self.Q_function(next_state_batch, next_action_batch)
+
+        opt_error = (next_Q + rintdiff_batch - Q).square().mean()
+
         # logging.debug(
         #     "HJB error = "
         #     f"{torch.sum(dQdx * state_dot_batch, dim=1).mean():+7.4f} "
@@ -119,12 +128,19 @@ class Agent():
         #     f"{HJB_error:+7.5f}"
         # )
 
-        self.HJB_optimizer.zero_grad()
-        HJB_error.backward()
-        self.HJB_optimizer.step()
+        # logging.debug("HJB error: "
+        #               f"{HJB_error:+7.4f} | "
+        #               "OPT error: "
+        #               f"{opt_error:+7.4}")
+
+        Q_error = HJB_error + opt_error
+
+        self.Q_optimizer.zero_grad()
+        Q_error.backward()
+        self.Q_optimizer.step()
 
         # Actor update
-        self.Q_function.eval()
+        # self.Q_function.eval()
 
         # state_batch.requires_grad_(False)
         action_batch = self.actor(state_batch)
@@ -142,7 +158,7 @@ class Agent():
 
         self.actor_optimizer.step()
 
-        self.Q_function.train()
+        # self.Q_function.train()
 
         info = dict(
             HJB_error=HJB_error.detach().numpy(),

@@ -5,6 +5,8 @@ import sys
 import logging
 import os
 import time
+from pathlib import Path
+import shutil
 
 from fym.core import BaseEnv, BaseSystem
 import fym.logging
@@ -70,7 +72,7 @@ def find_analytic_q_function(A, B, Q, R, Gamma):
     print(0.5 * (G.dot(A) + A.T.dot(G)) - E.T.dot(Gamma).dot(E) + Q)
     print(
         0.5 * (E.dot(B) + B.T.dot(E.T))
-        - F.T.dot(Gamma).dot(F)
+        # - F.T.dot(Gamma).dot(F)
         + R
     )
     print(G.dot(B) + A.T.dot(E.T) - 2 * E.T.dot(Gamma).dot(F))
@@ -79,11 +81,13 @@ def find_analytic_q_function(A, B, Q, R, Gamma):
 class Env(BaseEnv):
     Q = cfg.AGENT.Q
     R = cfg.AGENT.R
-    Gamma = cfg.AGENT.GAMMA
+    # Gamma = cfg.AGENT.GAMMA
 
     def __init__(self):
-        super().__init__(dt=cfg.TIME_STEP, max_t=cfg.FINAL_TIME)
+        super().__init__(dt=cfg.TIME_STEP, max_t=cfg.FINAL_TIME,
+                         ode_step_len=cfg.ODE_STEP_LEN)
         self.system = System()
+        self.rint = BaseSystem()
 
         optim_gain = self.system.get_optimal_gain(self.Q, self.R)
         self.optimal_gain, self.optimal_eigvals = optim_gain
@@ -94,28 +98,38 @@ class Env(BaseEnv):
 
     def reset(self):
         super().reset()
-        self.system.state = np.random.uniform(size=self.system.state.shape)
-        self.system.state *= np.deg2rad(np.vstack((30, 40)))
+        self.system.state = np.random.uniform(-1, 1,
+                                              size=self.system.state.shape)
+        self.system.state *= np.deg2rad(np.vstack((30, 30)))
         self.K, self.eigvals = self.system.get_random_stable_gain()
+        self.random_param = np.random.uniform(low=[0, 1, 0],
+                                              high=[2, 10, np.pi],
+                                              size=(10, 3))
 
     def step(self):
         t = self.clock.get()
         x = self.system.state
+        rint = self.rint.state
         u = self.get_input(t, x)
         xdot = self.system.deriv(x, u)
         r = self.get_reward(x, u)
 
         *_, done = self.update()
-        return (x, u, xdot, r), done
+
+        next_x = self.system.state
+        rintdiff = self.rint.state - rint
+        return (x, u, xdot, r, next_x, rintdiff), done
 
     def set_dot(self, t):
         x = self.system.state
         u = self.get_input(t, x)
         self.system.set_dot(u)
+        self.rint.dot = self.get_reward(x, u)
 
     def get_input(self, t, x):
         u = - self.K.dot(x)
-        u += np.deg2rad(np.sin(t))
+        for a, w, p in self.random_param:
+            u = u + np.deg2rad(1) * (a * np.sin(w * t + p))
         return u
 
     def get_reward(self, x, u):
@@ -125,13 +139,15 @@ class Env(BaseEnv):
     def logger_callback(self, i, t, y, t_hist, ode_hist):
         state_dict = self.observe_dict(y)
         x = state_dict["system"]
+        rint = state_dict["rint"]
         u = self.get_input(t, x)
         xdot = self.system.deriv(x, u)
         return dict(
             t=t,
             x=x,
             u=u,
-            xdot=xdot
+            xdot=xdot,
+            rint=rint,
         )
 
 
@@ -153,7 +169,7 @@ def set_logger():
 
 
 def run(agent, i):
-    logging.info(f"Starting run {i:03d}")
+    logging.info(f"Starting run {i:03d}/{cfg.EPISODE_LEN:03d}")
 
     logging.debug("Creating and resetting Env")
     env = Env()
@@ -198,6 +214,11 @@ def run(agent, i):
 
 def main():
     set_logger()
+
+    # Clear the data directory
+    for d in Path("data").iterdir():
+        shutil.rmtree(d)
+        logging.info(f"Data {d} is removed")
 
     # Set a Q-learning agent
     agent = Agent()
