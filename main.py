@@ -30,10 +30,14 @@ class System(BaseSystem):
     def deriv(self, x, u):
         return self.A.dot(x) + self.B.dot(u)
 
+    def get_optimal_gain(self, Q, R):
+        K, _, eigvals, _ = LQR.clqr(self.A, self.B, Q, R)
+        return K, eigvals
+
     def get_random_stable_gain(self):
         Q = np.diag(np.random.rand(2)) * 0.01
         R = np.diag(np.random.rand(1)) * 0.1
-        K, _, eigvals, _ = LQR.clqr(self.A, self.B, Q, R)
+        K, eigvals = self.get_optimal_gain(Q, R)
         return K, eigvals
 
 
@@ -81,17 +85,28 @@ class Env(BaseEnv):
         super().__init__(dt=cfg.TIME_STEP, max_t=cfg.FINAL_TIME)
         self.system = System()
 
+        optim_gain = self.system.get_optimal_gain(self.Q, self.R)
+        self.optimal_gain, self.optimal_eigvals = optim_gain
+
         # A, B = self.system.A, self.system.B
         # Q, R, Gamma = self.Q, self.R, self.Gamma
         # find_analytic_q_function(A, B, Q, R, Gamma)
 
     def reset(self):
         super().reset()
+        self.system.state = np.random.uniform(size=self.system.state.shape)
+        self.system.state *= np.deg2rad(np.vstack((30, 40)))
         self.K, self.eigvals = self.system.get_random_stable_gain()
 
     def step(self):
+        t = self.clock.get()
+        x = self.system.state
+        u = self.get_input(t, x)
+        xdot = self.system.deriv(x, u)
+        r = self.get_reward(x, u)
+
         *_, done = self.update()
-        return done
+        return (x, u, xdot, r), done
 
     def set_dot(self, t):
         x = self.system.state
@@ -100,7 +115,12 @@ class Env(BaseEnv):
 
     def get_input(self, t, x):
         u = - self.K.dot(x)
+        u += np.deg2rad(np.sin(t))
         return u
+
+    def get_reward(self, x, u):
+        r = x.T.dot(self.Q).dot(x) + u.T.dot(self.R).dot(u)
+        return r
 
     def logger_callback(self, i, t, y, t_hist, ode_hist):
         state_dict = self.observe_dict(y)
@@ -132,7 +152,7 @@ def set_logger():
     logging.getLogger().addHandler(console)
 
 
-def run(i):
+def run(agent, i):
     logging.info(f"Starting run {i:03d}")
 
     logging.debug("Creating and resetting Env")
@@ -141,37 +161,54 @@ def run(i):
 
     logging.debug(f"Eigenvalues: {env.eigvals[0]:5.2f}, {env.eigvals[1]:5.2f}")
 
-    datapath = os.path.join("data", "run", f"{i:03d}.h5")
-    env.logger = fym.logging.Logger(path=datapath)
+    rundir = os.path.join("data", f"run-{i:03d}")
+    env.logger = fym.logging.Logger(path=os.path.join(rundir, "traj.h5"))
+    env.logger.set_info(
+        optimal_gain=env.optimal_gain,
+        optimal_eigvals=env.optimal_eigvals,
+    )
+    agent_logger = fym.logging.Logger(path=os.path.join(rundir, "agent.h5"))
 
-    t = time.time()
+    t0 = time.time()
 
     while True:
-        # env.render()
-        done = env.step()
+        env.render()
+
+        t = env.clock.get()
+
+        data, done = env.step()
+
+        agent.set_data(data)
+        info = agent.optimize_model()
+
+        if info is not None:
+            agent_logger.record(t=t, info=info)
 
         if done:
             break
 
     env.close()
+    agent_logger.close()
 
-    t = time.time() - t
+    dt = time.time() - t0
 
-    logging.info(f"Data was saved in {datapath}")
-    logging.info(f"Running was finised in {t:5.3f} s")
+    logging.info(f"Data was saved in {rundir}")
+    logging.info(f"Running was finised in {dt:5.3f} s")
 
 
 def main():
     set_logger()
 
+    # Set a Q-learning agent
+    agent = Agent()
+
     # Get multiple traectory data
     for i in range(cfg.EPISODE_LEN):
-        run(i)
+        run(agent, i)
 
-    # Q-Learning
-    agent = Agent()
-    agent.set_data(os.path.join("data", "run"))
-    agent.learn()
+    # # Q-Learning
+    # agent.set_data(os.path.join("data", "run"))
+    # agent.learn()
 
 
 if __name__ == "__main__":
