@@ -78,8 +78,9 @@ class Agent():
 
         self.Q_optimizer = optim.Adam(
             self.Q_function.parameters(), lr=cfg.AGENT.HJB_OPTIM_LR)
-        self.actor_optimizer = optim.Adam(
-            self.actor.parameters(), lr=cfg.AGENT.ACTOR_OPTIM_LR)
+        self.actor_optimizer = optim.Adam(self.actor.parameters(),
+                                          lr=cfg.AGENT.ACTOR_OPTIM_LR,
+                                          betas=cfg.AGENT.ACTOR_OPTIM_BETAS)
 
     def set_data(self, data):
         proc_data = [torch.tensor(d).float().flatten()[None, :] for d in data]
@@ -161,7 +162,7 @@ class Agent():
         # self.Q_function.train()
 
         info = dict(
-            HJB_error=HJB_error.detach().numpy(),
+            HJB_error=Q_error.detach().numpy(),
             actor_error=actor_error.detach().numpy(),
             actor_param=actor_param,
         )

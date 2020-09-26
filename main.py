@@ -180,7 +180,7 @@ def run(agent, i):
     rundir = os.path.join("data", f"run-{i:03d}")
     env.logger = fym.logging.Logger(path=os.path.join(rundir, "traj.h5"))
     env.logger.set_info(
-        optimal_gain=env.optimal_gain,
+        optimal_gain=-env.optimal_gain,
         optimal_eigvals=env.optimal_eigvals,
     )
     agent_logger = fym.logging.Logger(path=os.path.join(rundir, "agent.h5"))
