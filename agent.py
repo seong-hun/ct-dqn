@@ -16,23 +16,20 @@ random.seed(cfg.AGENT.TORCH_SEED)
 np.random.seed(cfg.AGENT.TORCH_SEED)
 torch.manual_seed(cfg.AGENT.TORCH_SEED)
 
-Transition = namedtuple("Transition",
-                        ("state", "action", "state_dot", "reward",
-                         "next_state", "rintdiff"))
-
 
 class ReplayMemory():
-    def __init__(self, capacity):
-        self.memory = deque(maxlen=capacity)
+    def __init__(self, capacity, transition):
+        self.data = deque(maxlen=capacity)
+        self.transition = transition
 
     def push(self, *args):
-        self.memory.append(Transition(*args))
+        self.data.append(self.transition(*args))
 
     def sample(self, batch_size):
-        return random.sample(self.memory, batch_size)
+        return random.sample(self.data, batch_size)
 
     def __len__(self):
-        return len(self.memory)
+        return len(self.data)
 
 
 class DQN(nn.Module):
@@ -68,7 +65,72 @@ class Actor(nn.Module):
         return out
 
 
-class Agent():
+class BaseAgent:
+    def set_data(self, obs, action, reward, next_obs, info):
+        pass
+
+    def optimize_model(self):
+        pass
+
+    def get_action(self, obs):
+        pass
+
+
+class CMRACAgent(BaseAgent):
+    Transition = namedtuple("Transition", ("t", "eta", "chi"))
+    memory_capacity = cfg.CMRAC.AGENT.REPLAY_CAPACITY
+
+    def __init__(self):
+        self.memory = ReplayMemory(
+            capacity=self.memory_capacity + 1,
+            transition=self.Transition
+        )
+
+    def set_data(self, obs, action, reward, next_obs, info):
+        eta, chi = obs
+        t = info["t"]
+        self.memory.push(t, eta, chi)
+
+    def optimize_model(self):
+        memory_len = len(self.memory)
+
+        if memory_len <= self.memory_capacity:
+            return
+
+        batch = self.Transition(*zip(*list(self.memory.data)))
+
+        minevals = np.zeros(memory_len - 1)
+
+        for i in range(memory_len - 1):
+            Omega = np.sum(
+                [eta.dot(eta.T) for j, eta in enumerate(batch.eta) if j != i],
+                axis=0)
+            minevals[i] = np.linalg.eigvals(Omega).min()
+
+        del self.memory.data[minevals.argmin()]
+
+    def get_action(self, state):
+        if len(self.memory) < self.memory_capacity:
+            return 0, 0
+
+        Omega, M = self.sum(self.memory)
+        return Omega, M
+
+    def sum(self, memory):
+        batch = self.Transition(*zip(*list(memory.data)))
+        Omega = np.sum([eta.dot(eta.T) for eta in batch.eta], axis=0)
+        M = np.sum(
+            [eta.dot(chi.T) for eta, chi in zip(batch.eta, batch.chi)],
+            axis=0
+        )
+        return Omega, M
+
+    def get_info(self):
+        info = dict(stacked_time=self.memory["time"])
+        return info
+
+
+class Agent(BaseAgent):
     def __init__(self):
         self.memory = ReplayMemory(cfg.AGENT.REPLAY_CAPACITY)
         self.Q_function = DQN(2, 1)
@@ -91,7 +153,7 @@ class Agent():
             return
 
         transitions = self.memory.sample(cfg.AGENT.BATCH_SIZE)
-        batch = Transition(*zip(*transitions))
+        batch = self.Transition(*zip(*transitions))
 
         state_batch = torch.cat(batch.state)
         action_batch = torch.cat(batch.action)
