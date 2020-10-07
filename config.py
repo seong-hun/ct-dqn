@@ -32,7 +32,7 @@ MRAC = SN(
 CMRAC = SN(
     GAMMA_C=1e2,
     AGENT=SN(
-        REPLAY_CAPACITY=100,
+        MEMORY_CAPACITY=100,
     ),
 )
 

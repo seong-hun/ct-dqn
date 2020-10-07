@@ -31,6 +31,9 @@ class ReplayMemory():
     def __len__(self):
         return len(self.data)
 
+    def get_batch(self):
+        return self.transition(*zip(*list(self.data)))
+
 
 class DQN(nn.Module):
     def __init__(self, xdim, udim):
@@ -75,16 +78,21 @@ class BaseAgent:
     def get_action(self, obs):
         pass
 
+    def get_info(self):
+        return 0
+
 
 class CMRACAgent(BaseAgent):
     Transition = namedtuple("Transition", ("t", "eta", "chi"))
-    memory_capacity = cfg.CMRAC.AGENT.REPLAY_CAPACITY
+    memory_capacity = cfg.CMRAC.AGENT.MEMORY_CAPACITY
 
     def __init__(self):
         self.memory = ReplayMemory(
             capacity=self.memory_capacity + 1,
             transition=self.Transition
         )
+
+        self.min_eigval = 0
 
     def set_data(self, obs, action, reward, next_obs, info):
         eta, chi = obs
@@ -97,17 +105,19 @@ class CMRACAgent(BaseAgent):
         if memory_len <= self.memory_capacity:
             return
 
-        batch = self.Transition(*zip(*list(self.memory.data)))
+        batch = self.memory.get_batch()
 
-        minevals = np.zeros(memory_len - 1)
+        min_eigvals = np.zeros(memory_len - 1)
 
         for i in range(memory_len - 1):
             Omega = np.sum(
                 [eta.dot(eta.T) for j, eta in enumerate(batch.eta) if j != i],
                 axis=0)
-            minevals[i] = np.linalg.eigvals(Omega).min()
+            min_eigvals[i] = np.linalg.eigvals(Omega).min()
 
-        del self.memory.data[minevals.argmin()]
+        del self.memory.data[min_eigvals.argmin()]
+
+        self.min_eigval = min_eigvals.min()
 
     def get_action(self, state):
         if len(self.memory) < self.memory_capacity:
@@ -126,11 +136,13 @@ class CMRACAgent(BaseAgent):
         return Omega, M
 
     def get_info(self):
-        info = dict(stacked_time=self.memory["time"])
-        return info
+        stacked_time = np.array([data.t for data in self.memory.data])
+        stacked_time = fill_nan(stacked_time, self.memory_capacity)
+        min_eigval = self.min_eigval
+        return dict(stacked_time=stacked_time, min_eigval=min_eigval)
 
 
-class Agent(BaseAgent):
+class QLCMRACAgent(BaseAgent):
     def __init__(self):
         self.memory = ReplayMemory(cfg.AGENT.REPLAY_CAPACITY)
         self.Q_function = DQN(2, 1)
@@ -229,6 +241,15 @@ class Agent(BaseAgent):
             actor_param=actor_param,
         )
         return info
+
+
+def fill_nan(arr, size, axis=0):
+    if arr.shape[axis] < size:
+        pad_width = [[0, 0] for _ in range(np.ndim(arr))]
+        pad_width[axis][1] = size - arr.shape[axis]
+        return np.pad(arr, pad_width, constant_values=np.nan)
+    else:
+        return arr
 
 
 if __name__ == "__main__":

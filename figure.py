@@ -87,11 +87,11 @@ for envpath, line_style in zip(envpathlist, style["line"]):
         ),
     )
 
+    # Row 5
     if name in ["MRAC", "CMRAC"]:
         What = trajdata["state"]["controller"]["What"].squeeze()
 
         for w in What.T:
-            # Row 5
             fig.add_trace(
                 row=5, col=1,
                 trace=go.Scatter(
@@ -102,6 +102,29 @@ for envpath, line_style in zip(envpathlist, style["line"]):
                     showlegend=False
                 )
             )
+
+    # Row 6
+    if name in ["CMRAC"]:
+        agent_t = agentdata["t"]
+        stacked_time = agentdata["info"]["stacked_time"]
+
+        for st in stacked_time.T:
+            fig.add_trace(
+                row=6, col=1,
+                trace=go.Scattergl(
+                    x=st,
+                    y=agent_t,
+                    mode="markers",
+                    marker=dict(
+                        color=line_style["color"],
+                        size=2,
+                    ),
+                    opacity=0.5,
+                    legendgroup=name,
+                    showlegend=False,
+                )
+            )
+
 
 # References and commands
 fig.add_traces(
@@ -169,8 +192,9 @@ fig.update_yaxes(row=4, col=1,
 fig.update_yaxes(row=5, col=1,
                  title_text=r"$\hat{W}$")
 fig.update_yaxes(row=6, col=1,
-                 title_text=r"$\theta$")
+                 title_text="Stacked time")
 fig.update_xaxes(row=6, col=1,
+                 range=[0, t.max()],
                  title_text=r"$\text{Time (sec)}$")
 
 fig.update_layout(

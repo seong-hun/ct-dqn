@@ -13,7 +13,7 @@ from fym.core import BaseEnv, BaseSystem
 import fym.logging
 import fym.agents.LQR
 
-from agent import BaseAgent, CMRACAgent
+from agent import BaseAgent, CMRACAgent, QLCMRACAgent
 import config as cfg
 
 
@@ -102,7 +102,6 @@ class MainSystem(BaseEnv):
         if np.rad2deg(np.abs(self.x.xp.state[1])) > 90:
             done = True
             logging.info("OVER LIMIT")
-            breakpoint()
         return done
 
 
@@ -352,6 +351,7 @@ def run(env, agent, name):
         env.render()
 
         action = agent.get_action(obs)
+        agent_info = agent.get_info()
 
         next_obs, reward, done, info = env.step(action)
 
@@ -363,6 +363,11 @@ def run(env, agent, name):
             info=info
         )
         agent.optimize_model()
+
+        agent_logger.record(
+            t=info["t"],
+            info=agent_info,
+        )
 
         if done:
             break
@@ -381,8 +386,8 @@ def run(env, agent, name):
 def main():
     set_logger()
 
-    agentlist = ["CMRAC"]
-    # agentlist = ["MRAC"]
+    # agentlist = ["LQR", "MRAC", "CMRAC", "QLCMRAC"]
+    agentlist = ["QLCMRAC"]
 
     # Clear the data directory
     datapath = Path("data")
@@ -406,6 +411,9 @@ def main():
         elif name == "CMRAC":
             controller = CMRAC(system)
             agent = CMRACAgent()
+        elif name == "QLCMRAC":
+            controller = CMRAC(system)
+            agent = QLCMRACAgent()
 
         env = Env(system, controller)
         run(env, agent, name)
