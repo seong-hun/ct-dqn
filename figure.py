@@ -21,6 +21,7 @@ style = dict(
         dict(color="red", dash="solid"),
         dict(color="green", dash="solid"),
         dict(color="blue", dash="solid"),
+        dict(color="olive", dash="solid"),
     ],
     reference=dict(color="black", dash="dash"),
     command=dict(color="black"),
@@ -88,7 +89,7 @@ for envpath, line_style in zip(envpathlist, style["line"]):
     )
 
     # Row 5
-    if name in ["MRAC", "CMRAC"]:
+    if name in ["MRAC", "CMRAC", "QLCMRAC"]:
         What = trajdata["state"]["controller"]["What"].squeeze()
 
         for w in What.T:

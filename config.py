@@ -36,26 +36,28 @@ CMRAC = SN(
     ),
 )
 
-AGENT = SN(
-    Q=REFMODEL.Q,
-    R=REFMODEL.R,
-    gamma=1e-2,
-    # GAMMA=np.diag([0.01]),
-    REPLAY_CAPACITY=50000,
-    BATCH_SIZE=100,
-    M=1e3,
-    HJB_OPTIM_LR=1e-3,
-    ACTOR_OPTIM_LR=1e-1,
-    ACTOR_OPTIM_MOMENTUM=0.9,
-    ACTOR_OPTIM_BETAS=(0.9, 0.999),
-    TORCH_SEED=0,
+QLCMRAC = SN(
+    AGENT=SN(
+        REPLAY_CAPACITY=300,
+        BATCH_SIZE=100,
+        ITER_LIMIT=100,
+        ITER_THR=1e-3,
+        M=1e1,
+        HJB_OPTIM_LR=1e-4,
+    ),
+    H=0.1,
 )
 
 FILTER = SN(
     tauf=1e-3,
 )
 
+# For Env
 TIME_STEP = 1e-2
 FINAL_TIME = 40
 EPISODE_LEN = 150
 ODE_STEP_LEN = 10
+SEED = 0
+Q = REFMODEL.Q
+R = REFMODEL.R
+GAMMA = 1e-1

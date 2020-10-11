@@ -199,29 +199,24 @@ class MRAC(Controller, BaseEnv):
 
 
 class CMRAC(MRAC):
-    def __init__(self, system):
+    def __init__(self, system, agent):
         super().__init__(system)
         self.filter = Filter(A=system.x.A, B=system.x.B, K=system.xr.K)
 
-        self.Gamma_c = cfg.CMRAC.GAMMA_C
+        self.agent = agent
 
-    def set_dot(self, x, xr, u, action):
+    def set_dot(self, x, xr, u):
         e = x - xr
         P = self.P
         B = self.B
 
-        Omega, M = action
-
         What = self.What.state
 
-        if np.ndim(Omega) != 0:
-            norm = np.linalg.eigvals(Omega).max()
-        else:
-            norm = 1
+        composite_term = self.agent.composite_term(x, xr, What)
 
         self.What.dot = (
             self.Gamma * phi(x).dot(e.T).dot(P).dot(B)
-            - self.Gamma_c * (np.dot(Omega, What) - M) / norm
+            + composite_term
         )
         self.filter.set_dot(u, x, xr)
 
@@ -229,12 +224,7 @@ class CMRAC(MRAC):
         return None
 
     def observation(self, env):
-        xi = self.filter.xi.state
-        eta = self.filter.eta.state
-        x = env.system.x.state[:, None]
-        xr = env.system.xr.state
-        chi = self.filter.get_chi(xi, x, xr)
-        return eta, chi
+        return self.agent.observation(env)
 
 
 class Commander():
@@ -254,9 +244,9 @@ class Commander():
 
 
 class Env(BaseEnv):
-    Q = cfg.AGENT.Q
-    R = cfg.AGENT.R
-    gamma = cfg.AGENT.gamma
+    Q = cfg.Q
+    R = cfg.R
+    gamma = cfg.GAMMA
 
     def __init__(self, system, controller):
         super().__init__(dt=cfg.TIME_STEP, max_t=cfg.FINAL_TIME,
@@ -274,13 +264,15 @@ class Env(BaseEnv):
     def step(self, action):
         t = self.clock.get()
 
+        rint = self.rint.state
+
         *_, done = self.update(action=action)
 
         done = self.system.over_limit() or done
 
         next_obs = self.controller.observation(self)
 
-        reward = 0
+        reward = (self.rint.state - rint) * np.exp(self.gamma * t)
 
         info = dict(
             t=t,
@@ -297,7 +289,7 @@ class Env(BaseEnv):
         zcmd = self.commander.get_command(t)
 
         self.system.set_dot(u, zcmd)
-        self.controller.set_dot(x, xr, u, action)
+        self.controller.set_dot(x, xr, u)
         self.rint.dot = np.exp(-self.gamma * t) * self.get_reward(x, u)
 
     def get_reward(self, x, u):
@@ -409,11 +401,11 @@ def main():
             controller = MRAC(system)
             agent = BaseAgent()
         elif name == "CMRAC":
-            controller = CMRAC(system)
             agent = CMRACAgent()
+            controller = CMRAC(system, agent)
         elif name == "QLCMRAC":
-            controller = CMRAC(system)
             agent = QLCMRACAgent()
+            controller = CMRAC(system, agent)
 
         env = Env(system, controller)
         run(env, agent, name)

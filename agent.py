@@ -12,9 +12,9 @@ import torch.nn.functional as F
 import config as cfg
 
 
-random.seed(cfg.AGENT.TORCH_SEED)
-np.random.seed(cfg.AGENT.TORCH_SEED)
-torch.manual_seed(cfg.AGENT.TORCH_SEED)
+random.seed(cfg.SEED)
+np.random.seed(cfg.SEED)
+torch.manual_seed(cfg.SEED)
 
 
 class ReplayMemory():
@@ -34,6 +34,9 @@ class ReplayMemory():
     def get_batch(self):
         return self.transition(*zip(*list(self.data)))
 
+    def flush(self):
+        self.data.clear()
+
 
 class DQN(nn.Module):
     def __init__(self, xdim, udim):
@@ -42,29 +45,24 @@ class DQN(nn.Module):
             nn.Linear(xdim + udim, 32),
             nn.BatchNorm1d(32),
             nn.Tanh(),
-            nn.Linear(32, 32),
-            nn.BatchNorm1d(32),
+            nn.Linear(32, 64),
+            nn.BatchNorm1d(64),
             nn.Tanh(),
-            nn.Linear(32, 32),
+            nn.Linear(64, 128),
+            nn.BatchNorm1d(128),
+            nn.Tanh(),
+            nn.Linear(128, 64),
+            nn.BatchNorm1d(64),
+            nn.Tanh(),
+            nn.Linear(64, 32),
             nn.BatchNorm1d(32),
             nn.Tanh(),
             nn.Linear(32, 1),
-            nn.Tanh()
         )
 
     def forward(self, x, u):
         xu = torch.cat([x, u], dim=1)
         out = self.model(xu)
-        return out
-
-
-class Actor(nn.Module):
-    def __init__(self, xdim, udim):
-        super().__init__()
-        self.model = nn.Linear(xdim, udim, bias=False)
-
-    def forward(self, x):
-        out = self.model(x)
         return out
 
 
@@ -85,6 +83,7 @@ class BaseAgent:
 class CMRACAgent(BaseAgent):
     Transition = namedtuple("Transition", ("t", "eta", "chi"))
     memory_capacity = cfg.CMRAC.AGENT.MEMORY_CAPACITY
+    Gamma_c = cfg.CMRAC.GAMMA_C
 
     def __init__(self):
         self.memory = ReplayMemory(
@@ -119,7 +118,7 @@ class CMRACAgent(BaseAgent):
 
         self.min_eigval = min_eigvals.min()
 
-    def get_action(self, state):
+    def get_action(self, obs):
         if len(self.memory) < self.memory_capacity:
             return 0, 0
 
@@ -141,104 +140,114 @@ class CMRACAgent(BaseAgent):
         min_eigval = self.min_eigval
         return dict(stacked_time=stacked_time, min_eigval=min_eigval)
 
+    def composite_law(self, x, xr, What, action):
+        Omega, M = action
+
+        if np.ndim(Omega) != 0:
+            norm = np.linalg.eigvals(Omega).max()
+        else:
+            norm = 1
+
+        return - self.Gamma_c * (np.dot(Omega, What) - M) / norm
+
+    def observation(self, env):
+        xi = env.filter.xi.state
+        eta = env.filter.eta.state
+        x = env.system.x.state[:, None]
+        xr = env.system.xr.state
+        chi = env.filter.get_chi(xi, x, xr)
+        return eta, chi
+
 
 class QLCMRACAgent(BaseAgent):
-    def __init__(self):
-        self.memory = ReplayMemory(cfg.AGENT.REPLAY_CAPACITY)
-        self.Q_function = DQN(2, 1)
-        self.actor = Actor(2, 1)
+    Transition = namedtuple("Transition",
+                            ("z", "what", "R", "next_z", "next_what"))
 
-        self.M = cfg.AGENT.M
+    def __init__(self):
+        self.memory = ReplayMemory(
+            capacity=cfg.QLCMRAC.AGENT.REPLAY_CAPACITY,
+            transition=self.Transition,
+        )
+        self.Q_function = DQN(2 * cfg.DIM.n, cfg.DIM.q * cfg.DIM.m)
+
+        self.M = cfg.QLCMRAC.AGENT.M
+        self.factor = np.exp(-cfg.GAMMA * cfg.QLCMRAC.H)
 
         self.Q_optimizer = optim.Adam(
-            self.Q_function.parameters(), lr=cfg.AGENT.HJB_OPTIM_LR)
-        self.actor_optimizer = optim.Adam(self.actor.parameters(),
-                                          lr=cfg.AGENT.ACTOR_OPTIM_LR,
-                                          betas=cfg.AGENT.ACTOR_OPTIM_BETAS)
+            self.Q_function.parameters(), lr=cfg.QLCMRAC.AGENT.HJB_OPTIM_LR)
+        self.loss = nn.MSELoss()
 
-    def set_data(self, data):
-        proc_data = [torch.tensor(d).float().flatten()[None, :] for d in data]
+    def set_data(self, obs, action, reward, next_obs, info):
+        z, What = obs
+        R = reward
+        next_z, next_What = next_obs
+
+        proc_data = [torch.tensor(d).float().flatten()[None, :]
+                     for d in [z, What, R, next_z, next_What]]
         self.memory.push(*proc_data)
 
+    def composite_term(self, x, xr, What):
+        self.Q_function.eval()
+
+        z = np.vstack((x, xr)).T
+        z = torch.FloatTensor(z)
+        what = torch.FloatTensor(What).T
+        z.requires_grad_(True)
+        what.requires_grad_(True)
+
+        Q = self.Q_function(z, what)
+        dQdu = autograd.grad(Q.sum(), what, create_graph=True)[0]
+        dQdu = dQdu.detach().numpy()
+
+        comp = - self.M * dQdu / np.linalg.norm(dQdu)
+        return comp.T
+
+    def observation(self, env):
+        x = env.system.x.state[:, None]
+        xr = env.system.xr.state
+        z = np.vstack((x, xr))
+        What = env.controller.What.state
+        return z, What
+
+    def get_action(self, obs):
+        pass
+
     def optimize_model(self):
-        if len(self.memory) < cfg.AGENT.BATCH_SIZE:
+        if len(self.memory) < cfg.QLCMRAC.AGENT.REPLAY_CAPACITY:
             return
 
-        transitions = self.memory.sample(cfg.AGENT.BATCH_SIZE)
-        batch = self.Transition(*zip(*transitions))
+        self.Q_function.train()
 
-        state_batch = torch.cat(batch.state)
-        action_batch = torch.cat(batch.action)
-        state_dot_batch = torch.cat(batch.state_dot)
-        reward_batch = torch.cat(batch.reward)
-        next_state_batch = torch.cat(batch.next_state)
-        rintdiff_batch = torch.cat(batch.rintdiff)
+        for i in range(cfg.QLCMRAC.AGENT.ITER_LIMIT):
+            transitions = self.memory.sample(cfg.QLCMRAC.AGENT.BATCH_SIZE)
+            batch = self.Transition(*zip(*transitions))
 
-        # Q-function update
-        state_batch.requires_grad_(True)
-        action_batch.requires_grad_(True)
+            z_batch = torch.cat(batch.z)
+            what_batch = torch.cat(batch.what)
+            R_batch = torch.cat(batch.R)
+            next_z_batch = torch.cat(batch.next_z)
+            next_what_batch = torch.cat(batch.next_what)
 
-        Q = self.Q_function(state_batch, action_batch)
+            Q = self.Q_function(z_batch, what_batch)
 
-        dQdx = autograd.grad(Q.sum(), state_batch, create_graph=True)[0]
-        dQdu = autograd.grad(Q.sum(), action_batch, create_graph=True)[0]
+            with torch.no_grad():
+                next_Q = self.Q_function(next_z_batch, next_what_batch)
 
-        HJB_error = (
-            torch.sum(dQdx * state_dot_batch, dim=1)
-            - self.M * torch.sqrt(torch.sum(dQdu ** 2, dim=1))
-            + reward_batch.flatten()
-        ).square().mean()
+            loss = self.loss(self.factor * next_Q + R_batch, Q)
 
-        with torch.no_grad():
-            next_action_batch = self.actor(next_state_batch)
-            next_Q = self.Q_function(next_state_batch, next_action_batch)
+            self.Q_optimizer.zero_grad()
+            loss.backward()
+            self.Q_optimizer.step()
 
-        opt_error = (next_Q + rintdiff_batch - Q).square().mean()
+            logging.debug(f"[{i+1:02d}/{cfg.QLCMRAC.AGENT.ITER_LIMIT}] "
+                          f"Loss: {loss:07.4f}")
+            if loss < cfg.QLCMRAC.AGENT.ITER_THR:
+                break
 
-        # logging.debug(
-        #     "HJB error = "
-        #     f"{torch.sum(dQdx * state_dot_batch, dim=1).mean():+7.4f} "
-        #     f"{self.M * torch.sqrt(torch.sum(dQdu ** 2, dim=1)).mean():+7.4f} "
-        #     f"{reward_batch.flatten().mean():+7.4f} = "
-        #     f"{HJB_error:+7.5f}"
-        # )
-
-        # logging.debug("HJB error: "
-        #               f"{HJB_error:+7.4f} | "
-        #               "OPT error: "
-        #               f"{opt_error:+7.4}")
-
-        Q_error = HJB_error + opt_error
-
-        self.Q_optimizer.zero_grad()
-        Q_error.backward()
-        self.Q_optimizer.step()
-
-        # Actor update
-        # self.Q_function.eval()
-
-        # state_batch.requires_grad_(False)
-        action_batch = self.actor(state_batch)
-
-        Q = self.Q_function(state_batch, action_batch)
-        dQdu = autograd.grad(Q, action_batch,
-                             grad_outputs=torch.ones_like(Q),
-                             create_graph=True)[0]
-        actor_error = torch.sum(dQdu.square(), dim=1).mean()
-
-        actor_param = self.actor.model.weight.detach().numpy().T.copy()
-
-        self.actor_optimizer.zero_grad()
-        actor_error.backward(retain_graph=True)
-
-        self.actor_optimizer.step()
-
-        # self.Q_function.train()
+        self.memory.flush()
 
         info = dict(
-            HJB_error=Q_error.detach().numpy(),
-            actor_error=actor_error.detach().numpy(),
-            actor_param=actor_param,
+            loss=loss.detach().numpy(),
         )
         return info
 
